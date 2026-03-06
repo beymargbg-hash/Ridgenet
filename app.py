@@ -1,88 +1,98 @@
 import os
-import sqlite3
 from flask import Flask, request, jsonify, render_template
 import routeros_api
+from pymongo import MongoClient # Importación necesaria para MongoDB
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN DE RUTA PERSISTENTE ---
-# En Render, /app/data es el disco que no se borra.
-DB_PATH = '/app/data/elohim_system.db' if os.path.exists('/app/data') else 'elohim_system.db'
+# --- CONFIGURACIÓN DE MONGODB (LLAVE MAESTRA) ---
+# He integrado tu link de Cluster0.oe1r5ao
+MONGO_URI = "mongodb+srv://Beymar:Beymar@cluster0.oe1r5ao.mongodb.net/?appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client['ridginet_db']
+coleccion_clientes = db['abonados']
+coleccion_config = db['config_admin']
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    # Tabla para los abonados
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS abonados (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT,
-            dni TEXT UNIQUE,
-            ip_mikrotik TEXT,
-            perfil_mikrotik TEXT,
-            estado TEXT DEFAULT 'Activo'
-        )
-    ''')
-    # Tabla para la Configuración del Admin (API KEYS)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS config_admin (
-            id INTEGER PRIMARY KEY,
-            host TEXT,
-            user TEXT,
-            password TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
+# --- RUTA PRINCIPAL ---
 @app.route('/')
 def home():
     return render_template('index.html')
 
-# --- RUTA PARA GUARDAR LAS API KEYS DEL ADMIN ---
+# --- LÓGICA DE MIKROTIK ---
+def get_mt_connection(host, user, password):
+    try:
+        connection = routeros_api.RouterOsApiPool(host, username=user, password=password, plaintext_login=True)
+        return connection.get_api()
+    except Exception as e:
+        print(f"Error de conexión: {e}")
+        return None
+
+# --- NUEVA RUTA PARA GUARDAR CONFIGURACIÓN DEL ADMIN (PERSISTENTE) ---
 @app.route('/api/config_admin', methods=['POST'])
 def guardar_config():
     data = request.json
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO config_admin (id, host, user, password) 
-        VALUES (1, ?, ?, ?)
-    ''', (data['host'], data['user'], data['pass']))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "success", "message": "Configuración guardada"})
+    coleccion_config.update_one(
+        {"_id": "config_global"},
+        {"$set": {
+            "host": data.get('host'),
+            "user": data.get('user'),
+            "pass": data.get('pass')
+        }},
+        upsert=True
+    )
+    return jsonify({"status": "success", "message": "Configuración guardada en la nube"})
 
-# --- RUTA PARA LISTAR CLIENTES EN EL PANEL ADMIN ---
+# --- LISTAR CLIENTES PARA EL PANEL ---
 @app.route('/api/clientes', methods=['GET'])
 def listar_clientes():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM abonados')
-    clientes = [dict(row) for row in cursor.fetchall()]
-    conn.close()
+    clientes = list(coleccion_clientes.find({}, {"_id": 0}))
     return jsonify(clientes)
+
+@app.route('/api/sincronizar', methods=['POST'])
+def sincronizar_wisp():
+    data = request.json
+    api = get_mt_connection(data['host'], data['user'], data['pass'])
+    if not api:
+        return jsonify({"error": "No se pudo conectar al MikroTik"}), 400
+
+    clientes_encontrados = []
+    try:
+        secrets = api.get_resource('/ppp/secret').get()
+        for s in secrets:
+            clientes_encontrados.append({
+                "nombre": s.get('comment', s['name']),
+                "dni": s['name'], # Usamos el name como DNI inicial
+                "ip_mikrotik": s.get('remote-address', '0.0.0.0'),
+                "estado": "Activo"
+            })
+    except: pass
+
+    # Guardar en MongoDB (No se borra)
+    for c in clientes_encontrados:
+        coleccion_clientes.update_one(
+            {"dni": c['dni']},
+            {"$set": c},
+            upsert=True
+        )
+    
+    return jsonify({"status": "Sincronización completada", "total": len(clientes_encontrados)})
 
 @app.route('/api/login_cliente', methods=['POST'])
 def login_cliente():
     data = request.json
     dni = data.get('dni')
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM abonados WHERE dni = ?', (dni,))
-    user = cursor.fetchone()
-    conn.close()
+    user = coleccion_clientes.find_one({"dni": dni}, {"_id": 0})
+    
     if user:
-        return jsonify({"status": "success", "user": dict(user)})
-    return jsonify({"status": "error", "message": "No registrado"}), 404
+        return jsonify({"status": "success", "user": user})
+    return jsonify({"status": "error", "message": "DNI no registrado"}), 404
 
+@app.route('/api/control', methods=['POST'])
+def control_servicio():
+    return jsonify({"status": "Comando enviado"})
+
+# --- INICIO DEL SERVIDOR ---
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
     
