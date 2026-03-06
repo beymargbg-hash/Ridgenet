@@ -2,3 +2,4 @@ flask
 gunicorn
 routeros-api
 requests
+pymongo[srv]
