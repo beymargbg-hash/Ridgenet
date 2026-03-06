@@ -1,14 +1,21 @@
 import os
 import sqlite3
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template  # Agregamos render_template
 import routeros_api
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN DE BASE DE DATOS LOCAL ---
+# --- RUTA PARA EL VOLUMEN PERSISTENTE EN RENDER ---
+# Esto asegura que la base de datos viva en el disco que no se borra
+DB_PATH = '/app/data/elohim_system.db' if os.path.exists('/app/data') else 'elohim_system.db'
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def init_db():
-    # Creamos la base de datos si no existe
-    conn = sqlite3.connect('elohim_system.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS abonados (
@@ -25,20 +32,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- CONEXIÓN DINÁMICA AL MIKROTIK ---
+# --- RUTA PRINCIPAL (INDISPENSABLE PARA RENDER) ---
+@app.route('/')
+def home():
+    # Esto mostrará tu index.html de la carpeta templates
+    return render_template('index.html')
+
 def get_mt_connection(host, user, password):
     try:
         connection = routeros_api.RouterOsApiPool(host, username=user, password=password, plaintext_login=True)
         return connection.get_api()
     except Exception as e:
+        print(f"Error de conexión: {e}")
         return None
 
-# --- RUTA PRINCIPAL (Para ver tu HTML v2.0) ---
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-# --- LÓGICA DE SINCRONIZACIÓN (Tu código original) ---
 @app.route('/api/sincronizar', methods=['POST'])
 def sincronizar_wisp():
     data = request.json
@@ -56,7 +63,7 @@ def sincronizar_wisp():
             })
     except: pass
 
-    conn = sqlite3.connect('elohim_system.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     for c in clientes_encontrados:
         cursor.execute('INSERT OR IGNORE INTO abonados (nombre, ip_mikrotik) VALUES (?, ?)', 
@@ -65,24 +72,27 @@ def sincronizar_wisp():
     conn.close()
     return jsonify({"status": "Sincronización completada", "total": len(clientes_encontrados)})
 
-# --- LÓGICA DE LOGIN PARA CLIENTES (Tu código original) ---
 @app.route('/api/login_cliente', methods=['POST'])
 def login_cliente():
     data = request.json
     dni = data.get('dni')
-    conn = sqlite3.connect('elohim_system.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM abonados WHERE dni = ?', (dni,))
     user = cursor.fetchone()
     conn.close()
     if user:
-        return jsonify({"status": "success", "user": {"nombre": user[1], "estado": user[5]}})
+        return jsonify({"status": "success", "user": {"nombre": user['nombre'], "estado": user['estado']}})
     return jsonify({"status": "error", "message": "DNI no registrado"}), 404
 
-# --- INICIO DEL SERVIDOR (Optimizado para Railway) ---
+@app.route('/api/control', methods=['POST'])
+def control_servicio():
+    return jsonify({"status": "Comando enviado"})
+
+# --- INICIO DEL SERVIDOR (AJUSTADO PARA RENDER) ---
 if __name__ == '__main__':
     init_db()
-    # ESTO ES LO QUE HACE QUE NO FALLE:
+    # Capturamos el puerto de Render o usamos 5000 por defecto localmente
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
     
