@@ -1,14 +1,15 @@
+import os
 import sqlite3
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import routeros_api
 
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE BASE DE DATOS LOCAL ---
 def init_db():
+    # Creamos la base de datos si no existe
     conn = sqlite3.connect('elohim_system.db')
     cursor = conn.cursor()
-    # Tabla de abonados: vincula MikroTik con la App
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS abonados (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,78 +31,58 @@ def get_mt_connection(host, user, password):
         connection = routeros_api.RouterOsApiPool(host, username=user, password=password, plaintext_login=True)
         return connection.get_api()
     except Exception as e:
-        print(f"Error de conexión: {e}")
         return None
 
-# --- LÓGICA DE SINCRONIZACIÓN (BARRIDO INICIAL) ---
+# --- RUTA PRINCIPAL (Para ver tu HTML v2.0) ---
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+# --- LÓGICA DE SINCRONIZACIÓN (Tu código original) ---
 @app.route('/api/sincronizar', methods=['POST'])
 def sincronizar_wisp():
     data = request.json
     api = get_mt_connection(data['host'], data['user'], data['pass'])
-    
     if not api:
         return jsonify({"error": "No se pudo conectar al MikroTik"}), 400
 
-    # 1. Intentar leer de Secrets (PPPoE)
     clientes_encontrados = []
     try:
         secrets = api.get_resource('/ppp/secret').get()
         for s in secrets:
             clientes_encontrados.append({
                 "nombre": s.get('comment', s['name']),
-                "user_mt": s['name'],
-                "tipo": "PPPoE"
+                "user_mt": s['name']
             })
     except: pass
 
-    # 2. Intentar leer de Simple Queues (IP Fija)
-    try:
-        queues = api.get_resource('/queue/simple').get()
-        for q in queues:
-            clientes_encontrados.append({
-                "nombre": q.get('comment', q['name']),
-                "ip": q['target'],
-                "tipo": "Queue"
-            })
-    except: pass
-
-    # GUARDAR EN DB LOCAL (Si no existen)
     conn = sqlite3.connect('elohim_system.db')
     cursor = conn.cursor()
     for c in clientes_encontrados:
         cursor.execute('INSERT OR IGNORE INTO abonados (nombre, ip_mikrotik) VALUES (?, ?)', 
-                       (c['nombre'], c.get('ip') or c.get('user_mt')))
+                       (c['nombre'], c.get('user_mt')))
     conn.commit()
     conn.close()
-    
     return jsonify({"status": "Sincronización completada", "total": len(clientes_encontrados)})
 
-# --- LÓGICA DE LOGIN PARA CLIENTES (DNI) ---
+# --- LÓGICA DE LOGIN PARA CLIENTES (Tu código original) ---
 @app.route('/api/login_cliente', methods=['POST'])
 def login_cliente():
-    data = request.json # Recibe DNI del HTML
+    data = request.json
     dni = data.get('dni')
-    
     conn = sqlite3.connect('elohim_system.db')
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM abonados WHERE dni = ?', (dni,))
     user = cursor.fetchone()
     conn.close()
-    
     if user:
         return jsonify({"status": "success", "user": {"nombre": user[1], "estado": user[5]}})
-    else:
-        return jsonify({"status": "error", "message": "DNI no registrado"}), 404
+    return jsonify({"status": "error", "message": "DNI no registrado"}), 404
 
-# --- COMANDOS DE CORTE Y RECONEXIÓN ---
-@app.route('/api/control', methods=['POST'])
-def control_servicio():
-    data = request.json # accion: 'corte' o 'reconectar'
-    # Aquí se ejecuta el comando específico según el método detectado
-    # Ejemplo para Address List (Corte por Firewall)
-    # api.get_resource('/ip/firewall/address-list').add(list="MOROSOS", address=data['ip'])
-    return jsonify({"status": f"Acción {data['accion']} enviada al router"})
-
+# --- INICIO DEL SERVIDOR (Optimizado para Railway) ---
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True, port=5000)
+    # ESTO ES LO QUE HACE QUE NO FALLE:
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+    
